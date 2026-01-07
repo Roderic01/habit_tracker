@@ -2,12 +2,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { format, startOfWeek, endOfWeek, startOfMonth, endOfMonth, 
-         addDays, addMonths, isToday, isPast, eachDayOfInterval, 
+         addDays, addMonths, eachDayOfInterval, 
          startOfYear, endOfYear, isSameDay, subMonths, subWeeks,
          addWeeks, subYears, addYears } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { ChevronLeft, ChevronRight, CalendarClock, HelpCircle } from 'lucide-react';
-import { fetchCompletions } from '@/lib/database';
+import { fetchCompletions, formatLocalDate, setHabitCompletionForDate } from '@/lib/database';
 import { Habit, HabitCompletion } from '@/types';
 
 type ViewType = 'week' | 'month' | 'quarter' | 'semester' | 'year';
@@ -20,6 +20,7 @@ interface HabitGridProps {
 export function HabitGrid({ userId, habits }: HabitGridProps) {
   const [completions, setCompletions] = useState<HabitCompletion[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [savingCell, setSavingCell] = useState<{ habitId: string; date: string } | null>(null);
   const [viewType, setViewType] = useState<ViewType>('week');
   const [currentDate, setCurrentDate] = useState<Date>(new Date());
   const [dateRange, setDateRange] = useState<{ start: Date; end: Date }>({
@@ -95,27 +96,27 @@ export function HabitGrid({ userId, habits }: HabitGridProps) {
     setDateRange({ start, end });
   }
 
-  async function loadCompletions(start: Date, end: Date) {
-    setIsLoading(true);
+  async function loadCompletions(start: Date, end: Date, opts?: { silent?: boolean }) {
+    if (!opts?.silent) setIsLoading(true);
     try {
       const data = await fetchCompletions(userId, start, end);
       setCompletions(data);
     } catch (error) {
       console.error('Error cargando completados:', error);
     } finally {
-      setIsLoading(false);
+      if (!opts?.silent) setIsLoading(false);
     }
   }
 
   function getCompletionStatus(habit: Habit, date: Date) {
-    const dateStr = format(date, 'yyyy-MM-dd');
+    const dateStr = formatLocalDate(date);
     const isCompleted = completions.some(
       completion => completion.habit_id === habit.id && completion.date === dateStr
     );
 
     if (isCompleted) {
       return 'completed';
-    } else if (isPast(date) && !isToday(date)) {
+    } else if (isPastDay(date) && !isDateToday(date)) {
       return 'incomplete';
     } else {
       return 'neutral';
@@ -229,8 +230,47 @@ export function HabitGrid({ userId, habits }: HabitGridProps) {
     }
   }
   
-  function isToday(date: Date): boolean {
+  function isDateToday(date: Date): boolean {
     return isSameDay(date, new Date());
+  }
+
+  function isPastDay(date: Date): boolean {
+    const todayStr = formatLocalDate(new Date());
+    const dateStr = formatLocalDate(date);
+    return dateStr < todayStr;
+  }
+
+  async function handleCellToggle(habit: Habit, day: Date) {
+    const dayStr = formatLocalDate(day);
+    const todayStr = formatLocalDate(new Date());
+
+    const isCompleted = completions.some(
+      completion => completion.habit_id === habit.id && completion.date === dayStr
+    );
+
+    const prettyDate = format(day, 'PPP', { locale: es });
+    const isFutureDay = dayStr > todayStr;
+
+    const confirmMessage = isCompleted
+      ? `¿Quieres desmarcar "${habit.name}" como completado el ${prettyDate}?`
+      : isFutureDay
+        ? `Vas a marcar "${habit.name}" como completado para una fecha futura (${prettyDate}). ¿Seguro que ya te adelantaste?`
+        : `¿Confirmas que completaste "${habit.name}" el ${prettyDate}?`;
+
+    const ok = window.confirm(confirmMessage);
+    if (!ok) return;
+
+    setSavingCell({ habitId: habit.id, date: dayStr });
+    try {
+      const success = await setHabitCompletionForDate(habit.id, userId, day, !isCompleted);
+      if (!success) {
+        window.alert('No se pudo guardar el cambio. Intenta de nuevo.');
+        return;
+      }
+      await loadCompletions(dateRange.start, dateRange.end, { silent: true });
+    } finally {
+      setSavingCell(null);
+    }
   }
 
   function calculateOverallCompletionRate(): { completed: number, total: number, percentage: number } {
@@ -452,7 +492,7 @@ export function HabitGrid({ userId, habits }: HabitGridProps) {
                 days.map((day, index) => (
                   <th 
                     key={index} 
-                    className={`border p-0 text-center text-xs ${isToday(day) ? 'bg-primary/10' : ''}`}
+                    className={`border p-0 text-center text-xs ${isDateToday(day) ? 'bg-primary/10' : ''}`}
                   >
                     {formatDayHeader(day, viewType)}
                   </th>
@@ -536,12 +576,15 @@ export function HabitGrid({ userId, habits }: HabitGridProps) {
                             <div key={`week-${weekIdx}`} className="flex flex-col gap-0.5">
                               {week.map((day, dayIdx) => {
                                 const status = getCompletionStatus(habit, day);
+                                const dayStr = formatLocalDate(day);
+                                const isCellSaving = savingCell?.habitId === habit.id && savingCell.date === dayStr;
                                 return (
                                   <div 
                                     key={dayIdx}
-                                    className={`w-2 h-2 rounded-sm habit-cell-${status} ${isToday(day) ? 'today' : ''}`}
+                                    className={`w-2 h-2 rounded-sm habit-cell-${status} ${isDateToday(day) ? 'today' : ''} cursor-pointer ${isCellSaving ? 'opacity-60 pointer-events-none' : ''}`}
                                     title={`${habit.name} - ${format(day, 'PPP', { locale: es })}`}
-                                  ></div>
+                                    onClick={() => handleCellToggle(habit, day)}
+                                  />
                                 );
                               })}
                             </div>
@@ -554,6 +597,8 @@ export function HabitGrid({ userId, habits }: HabitGridProps) {
                   // Vistas con menos días: mostrar cada día individualmente
                   days.map((day, dayIndex) => {
                     const status = getCompletionStatus(habit, day);
+                    const dayStr = formatLocalDate(day);
+                    const isCellSaving = savingCell?.habitId === habit.id && savingCell.date === dayStr;
                     const cellSize = viewType === 'week' ? 'w-8 h-8' : 
                                     viewType === 'month' ? 'w-5 h-5' :
                                     viewType === 'quarter' ? 'w-4 h-4' : 'w-3 h-3';
@@ -561,8 +606,9 @@ export function HabitGrid({ userId, habits }: HabitGridProps) {
                     return (
                       <td 
                         key={dayIndex} 
-                        className={`border p-0 habit-cell-${status} ${isToday(day) ? 'today' : ''}`}
+                        className={`border p-0 habit-cell-${status} ${isDateToday(day) ? 'today' : ''} cursor-pointer ${isCellSaving ? 'opacity-60 pointer-events-none' : ''}`}
                         title={`${habit.name} - ${format(day, 'PPP', { locale: es })}`}
+                        onClick={() => handleCellToggle(habit, day)}
                       >
                         <div className={`aspect-square ${cellSize}`}></div>
                       </td>

@@ -14,7 +14,7 @@ function getLocalDate() {
 }
 
 // Convertir fecha a string YYYY-MM-DD en zona horaria local
-function formatLocalDate(date: Date) {
+export function formatLocalDate(date: Date) {
   const zonedDate = toZonedTime(date, TIME_ZONE);
   return format(zonedDate, 'yyyy-MM-dd');
 }
@@ -110,40 +110,56 @@ export async function fetchCompletions(userId: string, startDate: Date, endDate:
 }
 
 export async function markHabitComplete(habitId: string, userId: string): Promise<boolean> {
-  const today = getLocalDate();
-  const dateStr = formatLocalDate(today);
-  
   try {
-    // Check if already completed for this date
-    const { data: existing } = await supabase
-      .from('habit_completions')
-      .select('*')
-      .eq('habit_id', habitId)
-      .eq('user_id', userId)
-      .eq('date', dateStr)
-      .limit(1);
-    
-    // If not completed, add completion
-    if (!existing?.length) {
-      const { error } = await supabase
-        .from('habit_completions')
-        .insert([
-          { 
-            habit_id: habitId, 
-            user_id: userId, 
-            date: dateStr,
-            completed_at: today.toISOString()
-          },
-        ]);
-      
-      if (error) throw error;
-    }
-    
-    return true;
+    return await markHabitCompleteForDate(habitId, userId, new Date());
   } catch (error) {
     console.error('Error marking habit as complete:', error);
     return false;
   }
+}
+
+export async function markHabitCompleteForDate(
+  habitId: string,
+  userId: string,
+  date: Date
+): Promise<boolean> {
+  const now = getLocalDate();
+  const dateStr = formatLocalDate(date);
+
+  try {
+    // Upsert para evitar errores por UNIQUE(habit_id, date)
+    const { error } = await supabase
+      .from('habit_completions')
+      .upsert(
+        [
+          {
+            habit_id: habitId,
+            user_id: userId,
+            date: dateStr,
+            completed_at: now.toISOString(),
+          },
+        ],
+        { onConflict: 'habit_id,date' }
+      );
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('Error marking habit as complete for date:', error);
+    return false;
+  }
+}
+
+export async function setHabitCompletionForDate(
+  habitId: string,
+  userId: string,
+  date: Date,
+  completed: boolean
+): Promise<boolean> {
+  if (completed) {
+    return await markHabitCompleteForDate(habitId, userId, date);
+  }
+  return await removeHabitCompletion(habitId, userId, date);
 }
 
 export async function removeHabitCompletion(habitId: string, userId: string, date: Date): Promise<boolean> {
